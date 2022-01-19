@@ -234,7 +234,162 @@ from(bucket: "netdatatsdb/autogen")
                        r.host == "vpsfrsqlpac1" )
   |> schema.fieldsAsCols()
 ```
-- asdf
-```SQL
 
+## 히스토그램
+- histogram
+```SQL
+from(bucket:"netdatatsdb/autogen")
+  |> range(start: -3h)
+  |> filter(fn: (r) => r._measurement == "vpsmetrics" and
+                       r.host == "vpsfrsqlpac1" and
+                       r._field == "pcpu"
+  )
+  |> histogram(
+       bins:[0.0,10.0,20.0,30.0,40.0,50.0,60.0,70.0,80.0,90.0,100.0]
+   )
+```
+linearBins선형으로 분리된 부동 소수점 목록을 쉽게 만들 때 사용 합니다.
+  ```SQL
+  |> histogram( bins: linearBins(start: 0.0, width: 10.0, count: 10) )
+  ```
+로그 부동 소수점은 다음과 같이 정의됩니다. logarithmicBins
+  ```SQL
+  |> histogram(
+     bins: logarithmicBins(start: 1.0, factor: 2.0, count: 10,
+                           infinity: true)
+ )
+  ```
+기본적으로 값은 열에 누적되며 함수를 _value적용 difference하여 누적 계산을 재정의합니다.
+```SQL
+|> histogram( bins: linearBins(start: 0.0, width: 10.0, count: 10) )
+|> difference()
+```
+histogram             histogram + difference
+le     _value        le     _value
+-----  ------        -----  ------
+50     292           50     269
+60     536           60     241
+70     784           70     247
+
+## 계산된 열(MAP)
+
+- map
+```SQL
+|> map(fn: (r) => ({ _value: r._value * 2.0 }))
+```
+함수 의 기본 사용법은 map입력 테이블의 그룹 키( _time, _start, _stop…)의 일부가 아니고 명시적으로 매핑되지 않은 열을 제거합니다 with. 제거를 피하기 위해 연산자를 사용합니다.
+  ```SQL
+  |> map(fn: (r) => ({ r with _value: r._value * 2.0 }))
+  ```
+연산자는 열 이 with이미 있는 경우 업데이트하고 열이 없으면 새 열을 만들고 출력 테이블에 기존 열을 모두 포함합니다.
+
+## 사용자 정의 집계 함수(감소)
+
+- reduce
+```SQL
+|> reduce(fn: (r, accumulator) => ({
+    count: accumulator.count + 1,
+    total: accumulator.total + r._value,
+    avg: (accumulator.total + r._value) / float(v: accumulator.count)
+  }),
+  identity: {count: 1, total: 0.0, avg: 0.0}
+)
+```
+identity 초기 값과 데이터 유형을 정의합니다.
+집계를 저장하는 단일 행이 _time열 없이 반환됩니다.
+
+## 데이터 쓰기
+- to
+```SQL
+|> to(bucket:"history", org:"sqlpac")
+```
+동일한 버킷에 쓰려면 before set함수를 사용하여 측정 이름을 정의합니다.
+  ```SQL
+  |> set(key: "_measurement", value: "history_vpsmetrics")
+  |> to(bucket:"netdatatsdb/autogen", org:"sqlpac")
+  ```
+
+## SQL 데이터 소스
+
+- 메타데이터 정보(사용자 이름, 비밀번호…)
+influx secret또는 사용 curl하여 메타데이터 저장:
+```BASH
+$ influx secret update --key PG_HOST --value vpsfrsqlpac
+$ influx secret update --key PG_PORT --value 5432
+$ influx secret update --key PG_USER --value influxdb
+$ influx secret update --key PG_PASS --value "***********"
+```
+secret패키지 를 사용하여 Flux 스크립트에서 비밀 검색 (인증 확인 read:secrets):
+```SQL
+import "influxdata/influxdb/secrets"
+
+PG_HOST = secrets.get(key: "PG_HOST")
+PG_USER = secrets.get(key: "PG_USER")
+PG_PASS = secrets.get(key: "PG_PASS")
+PG_PORT = secrets.get(key: "PG_PORT")
+```
+- sql.from : 데이터 검색
+```SQL
+import "sql"
+
+import "influxdata/influxdb/secrets"
+// Get secrets…
+
+datavps = sql.from(
+  driverName: "postgres",
+  dataSourceName: "postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}?port=${PG_PORT}&sslmode=disable",
+  query: "SELECT name, totalmemory FROM vps"
+)
+```
+InfluxDB v2.0.4에서 사용 가능한 드라이버(향후 릴리스에 추가 예정):
+awsathena, , bigquery, mysql, postgres, snowflake, sqlserver, mssql
+
+- Joining data
+```SQL
+import "sql"
+import "influxdata/influxdb/secrets"
+// Get secrets…
+
+datavps = sql.from(
+  driverName: "postgres",
+  dataSourceName: "postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}?port=${PG_PORT}&sslmode=disable",
+  query: "SELECT name, totalmemory FROM vps"
+)
+  |> rename(columns : {name: "host"})
+
+datamem = from(bucket: "netdatatsdb/autogen")
+  |> range(start: -1d)
+  |> filter(fn: (r) => r._measurement == "vpsmetrics"
+                       and r._field == "mem"
+                       and r.host == "vpsfrsqlpac1")
+  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+
+join(
+    tables: {vps:datavps, mem:datamem},
+    on: ["host"],
+    method: "inner"
+  )
+  |> map(fn: (r) => ({ r with _value: (r._value / r.totalmemory) * 100.0 }))
+```
+- sql.to : 데이터 쓰기
+데이터를 받는 테이블 구조 확인 : 데이터 타입, 컬럼명, null/ not null.
+```SQL
+import "sql"
+
+import "influxdata/influxdb/secrets"
+// Get secrets…
+
+from(bucket: "netdatatsdb/autogen")
+  |> range(start: -1d)
+  |> filter(fn: (r) => r._measurement == "vps_pmem"
+                       and r._field == "pmem"
+                       and r.host == "vpsfrsqlpac2")
+  |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+  |> rename(columns: {_value: "pmem", _time: "dth"})
+  |> keep(columns: ["host", "dth", "pmem"])
+  |> sql.to(
+      driverName: "postgres",
+      dataSourceName: "postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}?port=${PG_PORT}&sslmode=disable",
+      table: "vpspmem"
+    )
 ```
