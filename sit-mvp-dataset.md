@@ -22,6 +22,6 @@ DownSampling DATA : 1Hour
 
 ### 통계 Service 정보 (Aurora Mysql RDS)
 |date|pvname|pdevice|cdevice|stae|ssrs|value|
-|------|---|---|---|---|
-|2022-02-24T14:52:00Z|TRN0001|ACB0001|0.0|92.0|
-|2022-02-24T15:02:00Z|TRN0001|ACB0001|0.0|93.0|
+|------|---|---|---|---|---|
+|2022-02-24T14:52:00Z|AI028|TRN0001|ACB0001|0.0|92.0|
+|2022-02-24T15:02:00Z|AI028|TRN0001|ACB0001|0.0|93.0|
